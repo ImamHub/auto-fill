@@ -1,1 +1,278 @@
+// ==UserScript==
+// @name         Joget ↔ Redict WO Helper (Local Only)
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  CTRL+K: scrape WO di Joget → simpan lokal; CTRL+L: isi form Tambah Data di Redict; plus tombol Lihat Data WO
+// @match        https://wfm.telkom.co.id/jw/web/userview/new_wfm/v/_*
+// @match        https://redict.my.id/dorder*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// ==/UserScript==
 
+(function () {
+    'use strict';
+
+    const host = location.hostname;
+
+    /********************* COMMON HELPERS *********************/
+    function selectByText(selectEl, text) {
+        if (!selectEl || !text) return;
+        const match = Array.from(selectEl.options)
+            .find(opt => opt.text.trim().toLowerCase() === text.trim().toLowerCase());
+        if (match) {
+            selectEl.value = match.value;
+            selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    }
+
+    function getAttr(data, name) {
+        return data.attributes?.find(a => a.attr_name === name)?.attr_value || '';
+    }
+
+    /********************* JOGET SIDE *********************/
+    if (host === 'wfm.telkom.co.id') {
+
+        function delay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function extractItemCode(fullValue) {
+            if (!fullValue) return '';
+            return fullValue.split('_')[0] || '';
+        }
+
+        async function collectAndSaveData() {
+            await delay(4000); // tunggu form penuh
+
+            const rawItemCode = document.querySelector('#parent_form_1_EBIS_form_workorder_scorderno')?.value || '';
+
+            const data = {
+                item_code: extractItemCode(rawItemCode),
+                commodity_order_id:    document.querySelector('#parent_form_1_EBIS_form_workorder_crmordertype')?.value || '',
+                commodity_regional_id: document.querySelector('#parent_form_1_EBIS_form_workorder_siteid')?.value || '',
+                commodity_service_id:  document.querySelector('#parent_form_1_EBIS_form_workorder_productname')?.value || '',
+                commodity_task_id:     document.querySelector('#parent_form_1_EBIS_form_workorder_description')?.value || '',
+                name:                  document.querySelector('#parent_form_1_EBIS_form_workorder_customer_name')?.value || '',
+                attributes: [],
+                token: "local-storage"
+            };
+
+            const rows = document.querySelectorAll('tr.grid-row');
+            rows.forEach(row => {
+                const wonum     = row.querySelector('[column_key="wonum"]')?.innerText.trim();
+                const attrName  = row.querySelector('[column_key="attr_name"]')?.innerText.trim();
+                const attrValue = row.querySelector('[column_key="attr_value"]')?.innerText.trim();
+
+                if (attrName && attrValue) {
+                    data.attributes.push({
+                        wonum: wonum || data.item_code,
+                        attr_name: attrName,
+                        attr_value: attrValue
+                    });
+                }
+            });
+
+            await GM_setValue("joget_temp_data", JSON.stringify(data));
+
+            console.log("📦 DATA WO DISIMPAN (Joget):", data);
+            alert("✅ Data WO berhasil disimpan ke perangkat (TM Storage)!");
+        }
+
+        document.addEventListener('keydown', async (e) => {
+            if (e.ctrlKey && e.key.toLowerCase() === 'k') {
+                e.preventDefault();
+                console.log("⌛ CTRL+K ditekan — scraping WO...");
+                await collectAndSaveData();
+            }
+        });
+
+        console.log("🚀 [WO Helper] Mode JOGET aktif — Tekan CTRL+K untuk simpan data.");
+    }
+
+    /********************* REDICT SIDE *********************/
+    if (host === 'redict.my.id') {
+
+        async function fillModal() {
+            const noOrderInput = document.querySelector('input[placeholder="Masukan No Order.."]');
+            if (!noOrderInput) {
+                alert("Modal 'Tambah Data' belum dibuka!");
+                return;
+            }
+
+            const raw = await GM_getValue("joget_temp_data", null);
+            if (!raw) {
+                alert("Belum ada data tersimpan.\nTekan CTRL+K di Joget terlebih dahulu.");
+                return;
+            }
+
+            let data;
+            try {
+                data = JSON.parse(raw);
+            } catch (e) {
+                alert("Data JSON rusak!");
+                console.error(e);
+                return;
+            }
+
+            console.log("📦 DATA UNTUK AUTOFILL (Redict):", data);
+
+            const modal = noOrderInput.closest('.modal') || document;
+
+            // NO ORDER
+            noOrderInput.value = data.item_code || '';
+
+            // Ambil semua <select> di modal sesuai urutan layout:
+            // 0: Order Type
+            // 1: Regional
+            // 2: Product Name
+            // 3: Type Product
+            // 4: Task
+            // 5: Status
+            const selects = modal.querySelectorAll('select');
+
+            const orderTypeSelect   = selects[0];
+            const regionalSelect    = selects[1];
+            const productNameSelect = selects[2];
+            const typeProductSelect = selects[3];
+            const taskSelect        = selects[4];
+            const statusSelect      = selects[5]; // optional
+
+            if (orderTypeSelect)
+                selectByText(orderTypeSelect, data.commodity_order_id);
+
+            if (regionalSelect)
+                selectByText(regionalSelect, data.commodity_regional_id);
+
+            if (productNameSelect)
+                selectByText(productNameSelect, data.commodity_service_id);
+
+            if (typeProductSelect)
+                selectByText(
+                    typeProductSelect,
+                    getAttr(data, "Package") ||
+                    getAttr(data, "Package_Exist") ||
+                    getAttr(data, "DC_Type")
+                );
+
+            if (taskSelect)
+                selectByText(taskSelect, data.commodity_task_id);
+
+            const custInput = modal.querySelector('input[placeholder="Masukan Customer.."]');
+            if (custInput) {
+                custInput.value =
+                    data.name ||
+                    getAttr(data, "Customer_Name") ||
+                    getAttr(data, "Customer_Name_Exist") ||
+                    "";
+            }
+
+            alert("✅ Form 'Tambah Data' berhasil diisi (CTRL+L).");
+        }
+
+        // Hotkey CTRL + L untuk isi form
+        document.addEventListener("keydown", async (e) => {
+            if (e.ctrlKey && e.key.toLowerCase() === "l") {
+                e.preventDefault();
+                console.log("⌛ CTRL+L ditekan — autofill modal...");
+                await fillModal();
+            }
+        });
+
+        // ===== Tombol Lihat Data =====
+        function createViewButton() {
+            const btn = document.createElement('button');
+            btn.textContent = 'Lihat Data WO';
+            Object.assign(btn.style, {
+                position: 'fixed',
+                right: '20px',
+                bottom: '20px',
+                zIndex: '99999',
+                padding: '8px 14px',
+                borderRadius: '6px',
+                border: 'none',
+                cursor: 'pointer',
+                background: '#2563eb',
+                color: '#fff',
+                fontSize: '12px'
+            });
+
+            btn.onclick = onViewClick;
+            document.body.appendChild(btn);
+        }
+
+        async function onViewClick() {
+            const raw = await GM_getValue("joget_temp_data", null);
+            if (!raw) {
+                alert("Belum ada data.\nTekan CTRL+K di Joget.");
+                return;
+            }
+
+            let pretty = raw;
+            try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch(e){}
+
+            const overlay = document.createElement('div');
+            Object.assign(overlay.style, {
+                position: 'fixed',
+                inset: '0',
+                background: 'rgba(0,0,0,0.5)',
+                zIndex: '99998',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+            });
+
+            const box = document.createElement('div');
+            Object.assign(box.style, {
+                background: '#fff',
+                padding: '10px',
+                borderRadius: '8px',
+                width: '80%',
+                maxWidth: '900px',
+                maxHeight: '80%',
+                display: 'flex',
+                flexDirection: 'column'
+            });
+
+            const title = document.createElement('div');
+            title.textContent = "Data WO (joget_temp_data)";
+            title.style.fontWeight = "bold";
+            title.style.marginBottom = "8px";
+
+            const textarea = document.createElement('textarea');
+            textarea.value = pretty;
+            Object.assign(textarea.style, {
+                flex: '1',
+                width: '100%',
+                resize: 'none',
+                fontFamily: 'monospace'
+            });
+
+            const closeBtn = document.createElement('button');
+            closeBtn.textContent = "Tutup";
+            Object.assign(closeBtn.style, {
+                marginTop: '10px',
+                alignSelf: 'flex-end',
+                padding: '5px 10px',
+                background: '#ef4444',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer'
+            });
+
+            closeBtn.onclick = () => overlay.remove();
+
+            box.appendChild(title);
+            box.appendChild(textarea);
+            box.appendChild(closeBtn);
+            overlay.appendChild(box);
+            document.body.appendChild(overlay);
+        }
+
+        window.addEventListener('load', () => {
+            createViewButton();
+            console.log("🚀 [WO Helper] Mode REDICT aktif — CTRL+L isi modal, tombol 'Lihat Data WO' di kanan bawah.");
+        });
+    }
+
+})();
